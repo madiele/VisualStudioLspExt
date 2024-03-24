@@ -71,7 +71,8 @@
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
-    <Content Include="server.exe">
+    <Content Include="..\..\..\server\target\debug\server.exe">
+      <Link>server.exe</Link>
       <IncludeInVSIX>true</IncludeInVSIX>
     </Content>
   </ItemGroup>

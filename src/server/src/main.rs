@@ -3,12 +3,15 @@
 
 use std::error::Error;
 
-use lsp_server::{Connection, ExtractError, Message, Request, RequestId, Response};
+use lsp_server::{Connection, ExtractError, Message, Notification, Request, RequestId, Response};
 use lsp_types::{
-    request::{CodeActionRequest, HoverRequest},
-    CodeAction, CodeActionKind, CodeActionProviderCapability, CodeLensOptions, Command, Hover,
-    HoverProviderCapability, InitializeParams, MarkedString, ServerCapabilities,
+    request::{CodeActionRequest, ExecuteCommand, HoverRequest},
+    CodeAction, CodeActionKind, CodeActionProviderCapability, CodeLensOptions, Command, Diagnostic,
+    DiagnosticSeverity, ExecuteCommandOptions, Hover, HoverProviderCapability, InitializeParams,
+    MarkedString, Position, PublishDiagnosticsParams, Range, ServerCapabilities, Url,
+    WorkDoneProgressOptions,
 };
+use serde_json::json;
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     eprintln!("lps server starting");
@@ -19,6 +22,12 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         code_lens_provider: Some(CodeLensOptions {
             resolve_provider: Some(false),
+        }),
+        execute_command_provider: Some(ExecuteCommandOptions {
+            commands: vec!["fake".to_string()],
+            work_done_progress_options: WorkDoneProgressOptions {
+                work_done_progress: Some(false),
+            },
         }),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         ..Default::default()
@@ -86,18 +95,19 @@ fn main_loop(
                     Err(ExtractError::MethodMismatch(req)) => req,
                 };
 
-                match cast::<CodeActionRequest>(req) {
+                let req = match cast::<CodeActionRequest>(req) {
                     Ok((id, params)) => {
                         eprintln!("got CodeActionRequest: #{id}, {params:?}");
+                        let uri = params.text_document.uri;
                         let result = Some(vec![CodeAction {
                             title: "test code action".to_string(),
-                            kind: Some(CodeActionKind::REFACTOR),
+                            kind: Some(CodeActionKind::QUICKFIX),
                             diagnostics: None,
                             edit: None,
                             command: Some(Command {
-                                title: "TODO".to_string(),
-                                command: "TODO".to_string(),
-                                arguments: None,
+                                title: "fakediagnostics".to_string(),
+                                command: "fake".to_string(),
+                                arguments: Some(vec![json!(uri)]),
                             }),
                             is_preferred: Some(false),
                             disabled: None,
@@ -110,6 +120,54 @@ fn main_loop(
                             error: None,
                         };
                         connection.sender.send(Message::Response(response))?;
+                        continue;
+                    }
+                    Err(err @ ExtractError::JsonError { .. }) => panic!("{err:?}"),
+                    Err(ExtractError::MethodMismatch(req)) => req,
+                };
+
+                match cast::<ExecuteCommand>(req) {
+                    Ok((id, mut params)) => {
+                        eprintln!("got ExecuteCommand: #{id}, {params:?}");
+                        let uri = serde_json::from_value::<String>(params.arguments[0].take())?;
+                        let result = Some(lsp_types::LSPAny::default());
+                        let result_json = serde_json::to_value(result).unwrap();
+                        let response = Response {
+                            id,
+                            result: Some(result_json),
+                            error: None,
+                        };
+                        connection.sender.send(Message::Response(response))?;
+                        let notification = Notification::new(
+                            "textDocument/publishDiagnostics".to_string(),
+                            PublishDiagnosticsParams {
+                                uri: Url::parse(uri.as_str())?,
+                                diagnostics: vec![Diagnostic {
+                                    range: Range {
+                                        start: Position {
+                                            line: 1,
+                                            character: 1,
+                                        },
+                                        end: Position {
+                                            line: 1,
+                                            character: 2,
+                                        },
+                                    },
+                                    severity: Some(DiagnosticSeverity::ERROR),
+                                    code: None,
+                                    code_description: None,
+                                    source: None,
+                                    message: "lol".to_string(),
+                                    related_information: None,
+                                    tags: None,
+                                    data: None,
+                                }],
+                                version: None,
+                            },
+                        );
+                        connection
+                            .sender
+                            .send(Message::Notification(notification))?;
                         continue;
                     }
                     Err(err @ ExtractError::JsonError { .. }) => panic!("{err:?}"),

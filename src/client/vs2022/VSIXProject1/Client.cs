@@ -23,7 +23,6 @@ namespace VisualStudioLspExt
 {
             await Task.Yield();
 
-
 			var process = new Process
 			{
 				StartInfo = new ProcessStartInfo
