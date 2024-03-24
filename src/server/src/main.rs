@@ -226,6 +226,12 @@ mod tests {
 
         // Create a query
         let query_source = "(class_declaration (identifier) @class)";
+        //let query_source = r#"
+        //                            (class_declaration
+        //                            name: (identifier) @controller (#match? @controller ".*Controller")
+        //                            bases: (base_list (identifier) @interface) (#match? @interface ".*Base")
+        //                            )
+        //"#;
         let query = Query::new(language(), query_source).expect("Error creating query");
 
         // Perform the query
