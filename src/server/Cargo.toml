@@ -9,4 +9,9 @@ edition = "2021"
 lsp-types = "*"
 lsp-server = "*"
 serde_json = "*"
+tree-sitter = "0.20.0"
+tree-sitter-c-sharp = "0.20.0"
 serde = "*"
+
+[build-dependencies]
+cc="*"

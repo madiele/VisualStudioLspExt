@@ -192,3 +192,55 @@ where
 {
     req.extract(R::METHOD)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+    use tree_sitter::{Parser, Query, QueryCursor};
+    use tree_sitter_c_sharp::language;
+
+    #[test]
+    fn test_parse_sample_cs() {
+        // Read the sample.cs file
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_owned();
+        path.push("client");
+        path.push("vs2022");
+        path.push("VSIXProject1");
+        path.push("Client.cs");
+
+        let source_code = fs::read_to_string(path).expect("Unable to read file");
+
+        // Create a parser
+        let mut parser = Parser::new();
+        parser
+            .set_language(language())
+            .expect("Error setting language");
+
+        // Parse the source code
+        let tree = parser
+            .parse(&source_code, None)
+            .expect("Error parsing code");
+
+        // Create a query
+        let query_source = "(class_declaration (identifier) @class)";
+        let query = Query::new(language(), query_source).expect("Error creating query");
+
+        // Perform the query
+        let mut cursor = QueryCursor::new();
+        let matches = cursor.matches(&query, tree.root_node(), source_code.as_bytes());
+
+        // Print the matched classes
+        for mat in matches {
+            for cap in mat.captures {
+                let node = cap.node;
+                let class_name = source_code[node.start_byte()..node.end_byte()].to_string();
+                let start = node.start_position();
+                let end = node.end_position();
+                println!("Matched class: {class_name} range: {start:?} -> {end:?}");
+            }
+        }
+    }
+}
