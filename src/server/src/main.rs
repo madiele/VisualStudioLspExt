@@ -3,27 +3,31 @@
 
 use std::error::Error;
 
-use log::{error, info};
-use log4rs::{
-    append::{
-        console::{ConsoleAppender, Target},
-        file::FileAppender,
-    },
-    config::{Appender, Root},
-    encode::pattern::PatternEncoder,
-    Config,
-};
+macro_rules! info {
+    // info!("a {} event", "log")
+    ($($arg:tt)+) => (eprintln!($($arg)+))
+}
+
+macro_rules! error {
+    // info!("a {} event", "log")
+    ($($arg:tt)+) => (eprintln!($($arg)+))
+}
+
 use lsp_server::{
-    Connection, ExtractError, Message, Notification, Request as ServerRequest, RequestId, Response,
+    Connection, ExtractError, Message, Notification as ServerNotification,
+    Request as ServerRequest, RequestId, Response,
 };
 use lsp_types::{
+    notification::{self, DidChangeTextDocument, Notification, PublishDiagnostics},
     request::{self, CodeActionRequest, ExecuteCommand, HoverRequest, Request},
     CodeAction, CodeActionKind, CodeActionProviderCapability, CodeLensOptions, Command, Diagnostic,
     DiagnosticSeverity, ExecuteCommandOptions, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, MarkedString, Position, PublishDiagnosticsParams, Range, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions,
+    InitializeParams, MarkedString, NumberOrString, Position, PublishDiagnosticsParams, Range,
+    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    WorkDoneProgressOptions,
 };
 use serde_json::json;
+use tree_sitter::{Parser, Query, QueryCursor};
 
 macro_rules! handle_request {
     ($handler:ident, $type:ty, $req:expr, $conn:expr) => {
@@ -32,29 +36,14 @@ macro_rules! handle_request {
     };
 }
 
+macro_rules! handle_notification {
+    ($handler:ident, $type:ty, $req:expr, $conn:expr) => {
+        let params = cast_notification::<$type>($req)?;
+        $handler(params, $conn)?;
+    };
+}
+
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
-    // Create a stderr appender
-    let stderr = ConsoleAppender::builder().target(Target::Stderr).build();
-
-    // Create a file appender
-    let logfile = FileAppender::builder()
-        .encoder(Box::new(PatternEncoder::new("{d} - {l} - {m}{n}")))
-        .build("log/output.log")?;
-
-    // Combine them into a config
-    let config = Config::builder()
-        .appender(Appender::builder().build("stderr", Box::new(stderr)))
-        .appender(Appender::builder().build("logfile", Box::new(logfile)))
-        .build(
-            Root::builder()
-                .appender("stderr")
-                .appender("logfile")
-                .build(log::LevelFilter::Info),
-        )?;
-
-    // Use this config
-    log4rs::init_config(config)?;
-
     if let Err(e) = start_lsp() {
         error!("{e:?}");
     }
@@ -141,9 +130,153 @@ fn main_loop(
                     "got notification: \n{}",
                     serde_json::to_string_pretty(&not)?
                 );
+                match not.method.as_str() {
+                    DidChangeTextDocument::METHOD => {
+                        handle_notification!(change, DidChangeTextDocument, not, &connection);
+                    }
+                    unsupported => error!("unsupported method received: {unsupported}"),
+                }
             }
         }
     }
+    Ok(())
+}
+fn change(
+    params: lsp_types::DidChangeTextDocumentParams,
+    connection: &Connection,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    info!(
+        "got DidChangeTextDocument: \n{}",
+        serde_json::to_string_pretty(&params)?
+    );
+    let source_code = &params.content_changes[0].text;
+
+    // Create a parser
+    let mut parser = Parser::new();
+    parser
+        .set_language(tree_sitter_c_sharp::language())
+        .expect("Error setting language");
+
+    // Parse the source code
+    let tree = parser.parse(source_code, None).ok_or("could not parse")?;
+
+    // Create a query
+    let query = r#"
+(constructor_declaration
+  parameters: 
+    (parameter_list
+      (parameter
+        type: (generic_name (identifier) @typeName)
+        name: (identifier) @varLoggerName
+      )
+    )
+  body: 
+    (block 
+      (expression_statement 
+        (assignment_expression
+          left: (identifier) @assignementName
+          right: (identifier) @varName) 
+      )
+    )
+  (#eq? @typeName "{interfaceName}") ;; the interface name
+  (#eq? @varLoggerName @varName)
+)
+"#
+    .replace("{interfaceName}", "ITelemetryLogger");
+    let query_source = query.as_str();
+    let query = Query::new(tree_sitter_c_sharp::language(), query_source)?;
+
+    // Perform the query
+    let mut cursor = QueryCursor::new();
+    let matches = cursor.matches(&query, tree.root_node(), source_code.as_bytes());
+
+    let mut internal_var_name: Option<String> = None;
+    // Print the matched classes
+    for mat in matches {
+        for cap in mat.captures {
+            let node = cap.node;
+            let class_name = source_code[node.start_byte()..node.end_byte()].to_string();
+            let start = node.start_position();
+            let end = node.end_position();
+            info!("Matched class: {class_name} range: {start:?} -> {end:?}");
+        }
+        let node = mat.captures[2].node;
+        internal_var_name = Some(source_code[node.start_byte()..node.end_byte()].to_string());
+        info!("choosen var: {}", internal_var_name.clone().unwrap());
+    }
+
+    // Create a query
+    let query = r#"
+(invocation_expression
+  function: 
+    (member_access_expression
+      expression: (identifier) @internalName
+      name: (identifier) @methodName
+    )
+  arguments: (argument_list . (argument) @string)
+  (#eq? @internalName "{InternalVarName}")
+)
+"#
+    .replace("{InternalVarName}", internal_var_name.unwrap().as_str());
+    let query_source = query.as_str();
+    let query = Query::new(tree_sitter_c_sharp::language(), query_source)?;
+
+    // Perform the query
+    let mut cursor = QueryCursor::new();
+    let matches = cursor.matches(&query, tree.root_node(), source_code.as_bytes());
+
+    // Print the matched classes
+    let mut diagnostics = Vec::new();
+
+    for mat in matches {
+        for cap in mat.captures {
+            let node = cap.node;
+            let identifier = source_code[node.start_byte()..node.end_byte()].to_string();
+            let start = node.start_position();
+            let end = node.end_position();
+            info!("Matched: {identifier} range: {start:?} -> {end:?}");
+        }
+        let diagnostic_node = mat.captures[2].node;
+        diagnostics.push(Diagnostic {
+            range: Range {
+                start: Position {
+                    line: diagnostic_node.start_position().row as u32,
+                    character: diagnostic_node.start_position().column as u32,
+                },
+                end: Position {
+                    line: diagnostic_node.end_position().row as u32,
+                    character: diagnostic_node.end_position().column as u32,
+                },
+            },
+            severity: Some(DiagnosticSeverity::INFORMATION),
+            code: Some(NumberOrString::String("CUS1234".to_string())),
+            code_description: Some(lsp_types::CodeDescription {
+                href: Url::parse("https://google.com")?,
+            }),
+            source: Some("madiele".to_string()),
+            message: format!(
+                "Matched: {}",
+                &source_code[diagnostic_node.start_byte()..diagnostic_node.end_byte()]
+            ),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+    }
+
+    let notification = ServerNotification::new(
+        PublishDiagnostics::METHOD.to_string(),
+        PublishDiagnosticsParams {
+            uri: params.text_document.uri,
+            diagnostics,
+            version: None,
+        },
+    );
+
+    connection
+        .sender
+        .send(Message::Notification(notification))?;
+
     Ok(())
 }
 
@@ -165,7 +298,7 @@ fn command(
         error: None,
     };
     connection.sender.send(Message::Response(response))?;
-    let notification = Notification::new(
+    let notification = ServerNotification::new(
         "textDocument/publishDiagnostics".to_string(),
         PublishDiagnosticsParams {
             uri: Url::parse(uri.as_str())?,
@@ -261,6 +394,16 @@ where
     R::Params: serde::de::DeserializeOwned,
 {
     req.extract(R::METHOD)
+}
+
+fn cast_notification<P>(
+    not: ServerNotification,
+) -> Result<P::Params, ExtractError<ServerNotification>>
+where
+    P: notification::Notification,
+    P::Params: serde::de::DeserializeOwned,
+{
+    not.extract(P::METHOD)
 }
 
 #[cfg(test)]
