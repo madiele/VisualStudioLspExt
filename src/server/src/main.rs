@@ -3,15 +3,24 @@
 
 use std::error::Error;
 
-use lsp_server::{Connection, ExtractError, Message, Notification, Request, RequestId, Response};
+use lsp_server::{
+    Connection, ExtractError, Message, Notification, Request as ServerRequest, RequestId, Response,
+};
 use lsp_types::{
-    request::{CodeActionRequest, ExecuteCommand, HoverRequest},
+    request::{self, CodeActionRequest, ExecuteCommand, HoverRequest, Request},
     CodeAction, CodeActionKind, CodeActionProviderCapability, CodeLensOptions, Command, Diagnostic,
-    DiagnosticSeverity, ExecuteCommandOptions, Hover, HoverProviderCapability, InitializeParams,
-    MarkedString, Position, PublishDiagnosticsParams, Range, ServerCapabilities, Url,
-    WorkDoneProgressOptions,
+    DiagnosticSeverity, ExecuteCommandOptions, Hover, HoverParams, HoverProviderCapability,
+    InitializeParams, MarkedString, Position, PublishDiagnosticsParams, Range, ServerCapabilities,
+    Url, WorkDoneProgressOptions,
 };
 use serde_json::json;
+
+macro_rules! handle_request {
+    ($handler:ident, $type:ty, $req:expr, $conn:expr) => {
+        let (id, params) = cast::<$type>($req)?;
+        $handler(id, params, $conn)?;
+    };
+}
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
     eprintln!("lps server starting");
@@ -73,106 +82,19 @@ fn main_loop(
 
                 eprintln!("got req: {req:?}");
 
-                let req = match cast::<HoverRequest>(req) {
-                    Ok((id, params)) => {
-                        eprintln!("got HoverRequest: #{id}, {params:?}");
-                        let result = Some(Hover {
-                            contents: lsp_types::HoverContents::Scalar(MarkedString::String(
-                                "hello world".to_string(),
-                            )),
-                            range: None,
-                        });
-                        let result_json = serde_json::to_value(&result).unwrap();
-                        let response = Response {
-                            id,
-                            result: Some(result_json),
-                            error: None,
-                        };
-                        connection.sender.send(Message::Response(response))?;
-                        continue;
+                match req.method.as_str() {
+                    HoverRequest::METHOD => {
+                        handle_request!(hover, HoverRequest, req, &connection);
                     }
-                    Err(err @ ExtractError::JsonError { .. }) => panic!("{err:?}"),
-                    Err(ExtractError::MethodMismatch(req)) => req,
-                };
-
-                let req = match cast::<CodeActionRequest>(req) {
-                    Ok((id, params)) => {
-                        eprintln!("got CodeActionRequest: #{id}, {params:?}");
-                        let uri = params.text_document.uri;
-                        let result = Some(vec![CodeAction {
-                            title: "test code action".to_string(),
-                            kind: Some(CodeActionKind::QUICKFIX),
-                            diagnostics: None,
-                            edit: None,
-                            command: Some(Command {
-                                title: "fakediagnostics".to_string(),
-                                command: "fake".to_string(),
-                                arguments: Some(vec![json!(uri)]),
-                            }),
-                            is_preferred: Some(false),
-                            disabled: None,
-                            data: None,
-                        }]);
-                        let result_json = serde_json::to_value(&result).unwrap();
-                        let response = Response {
-                            id,
-                            result: Some(result_json),
-                            error: None,
-                        };
-                        connection.sender.send(Message::Response(response))?;
-                        continue;
+                    CodeActionRequest::METHOD => {
+                        handle_request!(get_code_action, CodeActionRequest, req, &connection);
                     }
-                    Err(err @ ExtractError::JsonError { .. }) => panic!("{err:?}"),
-                    Err(ExtractError::MethodMismatch(req)) => req,
-                };
-
-                match cast::<ExecuteCommand>(req) {
-                    Ok((id, mut params)) => {
-                        eprintln!("got ExecuteCommand: #{id}, {params:?}");
-                        let uri = serde_json::from_value::<String>(params.arguments[0].take())?;
-                        let result = Some(lsp_types::LSPAny::default());
-                        let result_json = serde_json::to_value(result).unwrap();
-                        let response = Response {
-                            id,
-                            result: Some(result_json),
-                            error: None,
-                        };
-                        connection.sender.send(Message::Response(response))?;
-                        let notification = Notification::new(
-                            "textDocument/publishDiagnostics".to_string(),
-                            PublishDiagnosticsParams {
-                                uri: Url::parse(uri.as_str())?,
-                                diagnostics: vec![Diagnostic {
-                                    range: Range {
-                                        start: Position {
-                                            line: 1,
-                                            character: 1,
-                                        },
-                                        end: Position {
-                                            line: 1,
-                                            character: 2,
-                                        },
-                                    },
-                                    severity: Some(DiagnosticSeverity::ERROR),
-                                    code: None,
-                                    code_description: None,
-                                    source: None,
-                                    message: "lol".to_string(),
-                                    related_information: None,
-                                    tags: None,
-                                    data: None,
-                                }],
-                                version: None,
-                            },
-                        );
-                        connection
-                            .sender
-                            .send(Message::Notification(notification))?;
-                        continue;
+                    ExecuteCommand::METHOD => {
+                        handle_request!(command, ExecuteCommand, req, &connection);
                     }
-                    Err(err @ ExtractError::JsonError { .. }) => panic!("{err:?}"),
-                    Err(ExtractError::MethodMismatch(req)) => req,
-                };
+                    unsupported => eprintln!("unsupported method received: {unsupported}"),
+                }
+                continue;
             }
             lsp_server::Message::Response(res) => {
                 eprintln!("got response: {res:?}");
@@ -185,9 +107,108 @@ fn main_loop(
     Ok(())
 }
 
-fn cast<R>(req: Request) -> Result<(RequestId, R::Params), ExtractError<Request>>
+fn command(
+    id: RequestId,
+    mut params: lsp_types::ExecuteCommandParams,
+    connection: &Connection,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    eprintln!("got ExecuteCommand: #{id}, {params:?}");
+    let uri = serde_json::from_value::<String>(params.arguments[0].take())?;
+    let result = Some(lsp_types::LSPAny::default());
+    let result_json = serde_json::to_value(result).unwrap();
+    let response = Response {
+        id,
+        result: Some(result_json),
+        error: None,
+    };
+    connection.sender.send(Message::Response(response))?;
+    let notification = Notification::new(
+        "textDocument/publishDiagnostics".to_string(),
+        PublishDiagnosticsParams {
+            uri: Url::parse(uri.as_str())?,
+            diagnostics: vec![Diagnostic {
+                range: Range {
+                    start: Position {
+                        line: 1,
+                        character: 1,
+                    },
+                    end: Position {
+                        line: 1,
+                        character: 2,
+                    },
+                },
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: None,
+                message: "lol".to_string(),
+                related_information: None,
+                tags: None,
+                data: None,
+            }],
+            version: None,
+        },
+    );
+    connection
+        .sender
+        .send(Message::Notification(notification))?;
+    Ok(())
+}
+
+fn get_code_action(
+    id: RequestId,
+    params: lsp_types::CodeActionParams,
+    connection: &Connection,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    eprintln!("got CodeActionRequest: #{id}, {params:?}");
+    let uri = params.text_document.uri;
+    let result = Some(vec![CodeAction {
+        title: "test code action".to_string(),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: None,
+        edit: None,
+        command: Some(Command {
+            title: "fakediagnostics".to_string(),
+            command: "fake".to_string(),
+            arguments: Some(vec![json!(uri)]),
+        }),
+        is_preferred: Some(false),
+        disabled: None,
+        data: None,
+    }]);
+    let result_json = serde_json::to_value(result).unwrap();
+    let response = Response {
+        id,
+        result: Some(result_json),
+        error: None,
+    };
+    connection.sender.send(Message::Response(response))?;
+    Ok(())
+}
+
+fn hover(
+    id: RequestId,
+    params: HoverParams,
+    connection: &Connection,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    eprintln!("got HoverRequest: #{id}, {params:?}");
+    let result = Some(Hover {
+        contents: lsp_types::HoverContents::Scalar(MarkedString::String("hello world".to_string())),
+        range: None,
+    });
+    let result_json = serde_json::to_value(result).unwrap();
+    let response = Response {
+        id,
+        result: Some(result_json),
+        error: None,
+    };
+    connection.sender.send(Message::Response(response))?;
+    Ok(())
+}
+
+fn cast<R>(req: ServerRequest) -> Result<(RequestId, R::Params), ExtractError<ServerRequest>>
 where
-    R: lsp_types::request::Request,
+    R: request::Request,
     R::Params: serde::de::DeserializeOwned,
 {
     req.extract(R::METHOD)
