@@ -92,9 +92,9 @@ fn start_lsp() -> Result<(), Box<dyn Error + Sync + Send>> {
         }
     };
 
-    let json_capabilities = serde_json::to_string(&initialize_params)?;
+    let json_capabilities = serde_json::to_string_pretty(&initialize_params)?;
 
-    info!("client capabilities: {json_capabilities:?}");
+    info!("client capabilities: \n{json_capabilities}");
 
     main_loop(connection, initialize_params)?;
 
@@ -111,14 +111,14 @@ fn main_loop(
     let _params: InitializeParams = serde_json::from_value(params).unwrap();
     info!("starting main loop");
     for msg in &connection.receiver {
-        info!("got msg: {msg:?}");
+        info!("got msg: \n{}", serde_json::to_string_pretty(&msg)?);
         match msg {
             lsp_server::Message::Request(req) => {
                 if connection.handle_shutdown(&req)? {
                     return Ok(());
                 }
 
-                info!("got req: {req:?}");
+                info!("got req: \n{}", serde_json::to_string_pretty(&req)?);
 
                 match req.method.as_str() {
                     HoverRequest::METHOD => {
@@ -134,10 +134,13 @@ fn main_loop(
                 }
             }
             lsp_server::Message::Response(res) => {
-                info!("got response: {res:?}");
+                info!("got response: \n{}", serde_json::to_string_pretty(&res)?);
             }
             lsp_server::Message::Notification(not) => {
-                info!("got notification: {not:?}");
+                info!(
+                    "got notification: \n{}",
+                    serde_json::to_string_pretty(&not)?
+                );
             }
         }
     }
@@ -149,7 +152,10 @@ fn command(
     mut params: lsp_types::ExecuteCommandParams,
     connection: &Connection,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    info!("got ExecuteCommand: #{id}, {params:?}");
+    info!(
+        "got ExecuteCommand: #{id}, \n{}",
+        serde_json::to_string_pretty(&params)?
+    );
     let uri = serde_json::from_value::<String>(params.arguments[0].take())?;
     let result = Some(lsp_types::LSPAny::default());
     let result_json = serde_json::to_value(result).unwrap();
@@ -197,7 +203,10 @@ fn get_code_action(
     params: lsp_types::CodeActionParams,
     connection: &Connection,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    info!("got CodeActionRequest: #{id}, {params:?}");
+    info!(
+        "got CodeActionRequest: #{id}, \n{}",
+        serde_json::to_string_pretty(&params)?
+    );
     let uri = params.text_document.uri;
     let result = Some(vec![CodeAction {
         title: "test code action".to_string(),
@@ -228,7 +237,10 @@ fn hover(
     params: HoverParams,
     connection: &Connection,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    info!("got HoverRequest: #{id}, {params:?}");
+    info!(
+        "got HoverRequest: #{id}, \n{}",
+        serde_json::to_string_pretty(&params)?
+    );
     let result = Some(Hover {
         contents: lsp_types::HoverContents::Scalar(MarkedString::String("hello world".to_string())),
         range: None,
