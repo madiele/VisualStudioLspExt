@@ -12,6 +12,8 @@ serde_json = "*"
 tree-sitter = "0.20.0"
 tree-sitter-c-sharp = "0.20.0"
 serde = "*"
+log = "*"
+log4rs = "*"
 
 [build-dependencies]
 cc="*"

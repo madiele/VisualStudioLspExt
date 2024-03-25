@@ -3,6 +3,16 @@
 
 use std::error::Error;
 
+use log::{error, info};
+use log4rs::{
+    append::{
+        console::{ConsoleAppender, Target},
+        file::FileAppender,
+    },
+    config::{Appender, Root},
+    encode::pattern::PatternEncoder,
+    Config,
+};
 use lsp_server::{
     Connection, ExtractError, Message, Notification, Request as ServerRequest, RequestId, Response,
 };
@@ -11,7 +21,7 @@ use lsp_types::{
     CodeAction, CodeActionKind, CodeActionProviderCapability, CodeLensOptions, Command, Diagnostic,
     DiagnosticSeverity, ExecuteCommandOptions, Hover, HoverParams, HoverProviderCapability,
     InitializeParams, MarkedString, Position, PublishDiagnosticsParams, Range, ServerCapabilities,
-    Url, WorkDoneProgressOptions,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkDoneProgressOptions,
 };
 use serde_json::json;
 
@@ -23,12 +33,42 @@ macro_rules! handle_request {
 }
 
 fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
-    eprintln!("lps server starting");
+    // Create a stderr appender
+    let stderr = ConsoleAppender::builder().target(Target::Stderr).build();
+
+    // Create a file appender
+    let logfile = FileAppender::builder()
+        .encoder(Box::new(PatternEncoder::new("{d} - {l} - {m}{n}")))
+        .build("log/output.log")?;
+
+    // Combine them into a config
+    let config = Config::builder()
+        .appender(Appender::builder().build("stderr", Box::new(stderr)))
+        .appender(Appender::builder().build("logfile", Box::new(logfile)))
+        .build(
+            Root::builder()
+                .appender("stderr")
+                .appender("logfile")
+                .build(log::LevelFilter::Info),
+        )?;
+
+    // Use this config
+    log4rs::init_config(config)?;
+
+    if let Err(e) = start_lsp() {
+        error!("{e:?}");
+    }
+    Ok(())
+}
+
+fn start_lsp() -> Result<(), Box<dyn Error + Sync + Send>> {
+    info!("lps server starting");
 
     let (connection, io_threads) = Connection::stdio();
 
     let capabilities = serde_json::to_value(ServerCapabilities {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         code_lens_provider: Some(CodeLensOptions {
             resolve_provider: Some(false),
         }),
@@ -40,8 +80,7 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
         }),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         ..Default::default()
-    })
-    .unwrap();
+    })?;
 
     let initialize_params = match connection.initialize(capabilities) {
         Ok(it) => it,
@@ -55,14 +94,13 @@ fn main() -> Result<(), Box<dyn Error + Sync + Send>> {
 
     let json_capabilities = serde_json::to_string(&initialize_params)?;
 
-    eprintln!("client capabilities: {json_capabilities:?}");
+    info!("client capabilities: {json_capabilities:?}");
 
     main_loop(connection, initialize_params)?;
 
     io_threads.join()?;
 
-    eprintln!("stopping server");
-
+    info!("stopping server");
     Ok(())
 }
 
@@ -71,16 +109,16 @@ fn main_loop(
     params: serde_json::Value,
 ) -> Result<(), Box<dyn Error + Sync + Send>> {
     let _params: InitializeParams = serde_json::from_value(params).unwrap();
-    eprintln!("starting main loop");
+    info!("starting main loop");
     for msg in &connection.receiver {
-        eprintln!("got msg: {msg:?}");
+        info!("got msg: {msg:?}");
         match msg {
             lsp_server::Message::Request(req) => {
                 if connection.handle_shutdown(&req)? {
                     return Ok(());
                 }
 
-                eprintln!("got req: {req:?}");
+                info!("got req: {req:?}");
 
                 match req.method.as_str() {
                     HoverRequest::METHOD => {
@@ -92,15 +130,14 @@ fn main_loop(
                     ExecuteCommand::METHOD => {
                         handle_request!(command, ExecuteCommand, req, &connection);
                     }
-                    unsupported => eprintln!("unsupported method received: {unsupported}"),
+                    unsupported => error!("unsupported method received: {unsupported}"),
                 }
-                continue;
             }
             lsp_server::Message::Response(res) => {
-                eprintln!("got response: {res:?}");
+                info!("got response: {res:?}");
             }
             lsp_server::Message::Notification(not) => {
-                eprintln!("got notification: {not:?}");
+                info!("got notification: {not:?}");
             }
         }
     }
@@ -112,7 +149,7 @@ fn command(
     mut params: lsp_types::ExecuteCommandParams,
     connection: &Connection,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    eprintln!("got ExecuteCommand: #{id}, {params:?}");
+    info!("got ExecuteCommand: #{id}, {params:?}");
     let uri = serde_json::from_value::<String>(params.arguments[0].take())?;
     let result = Some(lsp_types::LSPAny::default());
     let result_json = serde_json::to_value(result).unwrap();
@@ -160,7 +197,7 @@ fn get_code_action(
     params: lsp_types::CodeActionParams,
     connection: &Connection,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    eprintln!("got CodeActionRequest: #{id}, {params:?}");
+    info!("got CodeActionRequest: #{id}, {params:?}");
     let uri = params.text_document.uri;
     let result = Some(vec![CodeAction {
         title: "test code action".to_string(),
@@ -191,7 +228,7 @@ fn hover(
     params: HoverParams,
     connection: &Connection,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    eprintln!("got HoverRequest: #{id}, {params:?}");
+    info!("got HoverRequest: #{id}, {params:?}");
     let result = Some(Hover {
         contents: lsp_types::HoverContents::Scalar(MarkedString::String("hello world".to_string())),
         range: None,
@@ -271,3 +308,4 @@ mod tests {
         }
     }
 }
+
